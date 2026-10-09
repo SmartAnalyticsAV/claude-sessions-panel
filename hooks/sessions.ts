@@ -1,4 +1,4 @@
-import type { SessionsPaneRow, SessionsPaneState } from '../types'
+import type { SessionsPanelRow, SessionsPanelState } from '../types'
 
 // One entry of `claude agents --json`.
 export type Agent = {
@@ -32,7 +32,7 @@ const GRACE_MS = 1000
 export const IDLE_FOLD_MS = 12 * 60 * 60 * 1000
 
 export const GROUPS: readonly {
-  state: SessionsPaneState
+  state: SessionsPanelState
   title: string
   glyph: string
   color: string
@@ -60,7 +60,7 @@ export function stateOf(
   reg: Registry | undefined,
   ev: ControlEvent | undefined,
   transcriptMtimeMs: number | undefined,
-): SessionsPaneState {
+): SessionsPanelState {
   const status = reg?.status ?? agent.status
   if (status === 'idle') return 'idle'
   if (status !== 'busy') return 'other'
@@ -73,9 +73,9 @@ export function stateOf(
 export function rowOf(
   agent: Agent,
   reg: Registry | undefined,
-  state: SessionsPaneState,
+  state: SessionsPanelState,
   selfId: string,
-): SessionsPaneRow {
+): SessionsPanelRow {
   const project = projectOf(agent.cwd)
 
   return {
@@ -90,7 +90,7 @@ export function rowOf(
 }
 
 // The project is left out where the session's name already says it.
-export function detailOf(row: SessionsPaneRow, now: number): string {
+export function detailOf(row: SessionsPanelRow, now: number): string {
   const norm = (s: string) => s.toLowerCase().replaceAll('_', '-')
   const parts = norm(row.name).includes(norm(row.project)) ? [] : [row.project]
   parts.push(formatAge(now - row.since))
@@ -111,7 +111,7 @@ export function formatAge(ms: number): string {
 
 // Rows of each state, newest change first; idle ones quiet for longer than
 // IDLE_FOLD_MS are only counted.
-export function groupRows(rows: readonly SessionsPaneRow[], now: number) {
+export function groupRows(rows: readonly SessionsPanelRow[], now: number) {
   return GROUPS.map(group => {
     const own = rows
       .filter(row => row.state === group.state)
@@ -127,8 +127,8 @@ export function groupRows(rows: readonly SessionsPaneRow[], now: number) {
 // decision, or went idle after working (a turn ended). Nothing is reported on
 // the first check, when there is no `prev`.
 export function changesOf(
-  prev: ReadonlyMap<string, SessionsPaneState> | undefined,
-  fresh: readonly SessionsPaneRow[],
+  prev: ReadonlyMap<string, SessionsPanelState> | undefined,
+  fresh: readonly SessionsPanelRow[],
 ) {
   const known = prev === undefined ? [] : fresh.filter(row => prev.has(row.id))
   const waiting = known.filter(row => row.state === 'waiting' && prev?.get(row.id) !== 'waiting')
@@ -179,4 +179,28 @@ export function formatLeft(ms: number): string {
   if (hours < 24) return `через ${hours} ч ${min % 60} мин`
 
   return `через ${Math.floor(hours / 24)} дн ${hours % 24} ч`
+}
+
+export type Platform = 'mac' | 'windows' | 'linux'
+
+// Where the sessions running the mod share their state: the platform's own
+// cache folder.
+export function cacheDirOf(
+  platform: Platform,
+  home: string,
+  name: string,
+  localAppData?: string,
+  xdgCache?: string,
+): string {
+  if (platform === 'windows') return `${localAppData ?? `${home}/AppData/Local`}/${name}`
+  if (platform === 'mac') return `${home}/Library/Caches/${name}`
+
+  return `${xdgCache ?? `${home}/.cache`}/${name}`
+}
+
+// Run with no shell, Windows finds no `claude.cmd`: there it goes through cmd.exe.
+export function agentsArgv(platform: Platform): string[] {
+  return platform === 'windows'
+    ? ['cmd.exe', '/d', '/s', '/c', 'claude agents --json']
+    : ['claude', 'agents', '--json']
 }

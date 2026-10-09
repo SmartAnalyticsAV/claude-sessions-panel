@@ -1,26 +1,26 @@
-export type SessionsPaneState = 'waiting' | 'busy' | 'idle' | 'other'
+export type SessionsPanelState = 'waiting' | 'busy' | 'idle' | 'other'
 
-export type SessionsPaneRow = {
+export type SessionsPanelRow = {
   id: string
   name: string
   project: string
-  state: SessionsPaneState
+  state: SessionsPanelState
   since: number
   via: string
   isSelf: boolean
 }
 
-export type SessionsPaneLimits = {
+export type SessionsPanelLimits = {
   at: number
   windows: { kind: string; percentUsed: number; resetsAt?: string }[]
 }
 
 declare module 'claude-code' {
   interface PluginState {
-    'sessions-pane': {
-      rows: SessionsPaneRow[]
+    'sessions-panel': {
+      rows: SessionsPanelRow[]
       error: string | null
-      limits: SessionsPaneLimits | null
+      limits: SessionsPanelLimits | null
     }
   }
 }

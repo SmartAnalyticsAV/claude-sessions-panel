@@ -1,8 +1,8 @@
-# sessions-pane
+# sessions-panel
 
 Мод для Claude Code: панель со всеми живыми сессиями на этой машине, их статусами и лимитами подписки. Работает в терминале и во вкладке Code приложения Claude.
 
-*In English: a Claude Code mod that shows every live session on this machine grouped by status (waiting for a decision, working, idle), the 5-hour and weekly rate limits, and plays a sound when a session needs you or finishes. UI is in Russian.*
+*In English: a Claude Code mod that shows every live session on this machine grouped by status (waiting for a decision, working, idle), the 5-hour and weekly rate limits, and plays a sound when a session needs you or finishes. Tested on macOS; Windows support is experimental. UI is in Russian.*
 
 ```
 Лимиты · обновлено только что
@@ -30,19 +30,31 @@
 - Строка под полем ввода «Ждут решения: N».
 - Команда `/sessions` открывает панель, если её закрыли.
 
+## Где работает
+
+| | macOS | Windows | Linux |
+|---|---|---|---|
+| Статус проверки | проверено | экспериментально, не проверено | не проверено |
+| Сессии «Работают» и «Свободны» | да | должно работать | должно работать |
+| Лимиты | да | должно работать | должно работать |
+| «Ждут решения» | с Claude Control | нет | нет |
+| Звуки | да | нет | нет |
+
+- Звуки: Claude Code проигрывает звук мода только на macOS (через `afplay`), в терминале Windows и Linux проигрывателя нет.
+- «Ждут решения» берётся из событий хука [Claude Control](https://github.com/sverrirsig/claude-control), а это приложение только для macOS. Без него эта группа не появляется, остальное работает.
+- Если вы пробовали мод на Windows или Linux, напишите в issues, что получилось - это поможет снять пометку «не проверено».
+
 ## Требования
 
 - Claude Code 2.1.287 или новее (моды). Проверено на 2.1.293.
-- macOS - для звуков и общей папки `~/Library/Caches/sessions-pane`. На Linux и Windows панель работает, но без звуков.
 - Подписка Claude (Pro или Max) - для блока лимитов. Без подписки блок не показывается.
-- Необязательно: [Claude Control](https://github.com/sverrirsig/claude-control). Статус «ждёт решения» берётся из событий его хука. Без него эта группа не появляется, остальное работает.
 
 ## Установка
 
 В терминальной сессии Claude Code:
 
 ```
-/plugin install sessions-pane --marketplace SmartAnalyticsAV/claude-sessions-pane
+/plugin install sessions-panel --marketplace SmartAnalyticsAV/claude-sessions-panel
 ```
 
 Ответить `y` на вопрос о маркетплейсе и выбрать уровень пользователя. Во вкладке Code приложения эта команда недоступна, но мод, установленный из терминала, работает и там.
@@ -50,15 +62,16 @@
 Удалить:
 
 ```
-claude plugin uninstall sessions-pane@sessions-pane
+claude plugin uninstall sessions-panel@sessions-panel
 ```
 
 ## Как это работает
 
-- Список живых сессий - из `claude agents --json`, статус «работает» или «свободна» - из реестра Claude Code `~/.claude/sessions/<pid>.json`.
+- Список живых сессий - из `claude agents --json` (на Windows - через `cmd.exe`), статус «работает» или «свободна» - из реестра Claude Code `~/.claude/sessions/<pid>.json`.
 - «Ждёт решения» - последнее событие Claude Control для сессии `PermissionRequest`, и журнал сессии после него не дописывался. Это эвристика, возможны редкие ложные срабатывания.
 - Лимиты приходят с каждым ответом сервера в любой сессии; самые свежие цифры хранятся в общей папке, поэтому строка «обновлено N мин назад» показывает их возраст.
 - Мод запускается в каждой сессии, где загружен. Чтобы не было N звонков на одно событие, сессии отмечаются в общей папке, и звенит только одна. Список сессий тоже запрашивается один раз на всех.
+- Общая папка: macOS - `~/Library/Caches/sessions-panel`, Windows - `%LOCALAPPDATA%\sessions-panel`, Linux - `~/.cache/sessions-panel` (или `$XDG_CACHE_HOME`).
 
 Мод читает только локальные файлы Claude Code и Claude Control, запускает `claude agents --json` и ничего не отправляет в сеть. Как и любой мод, он работает без песочницы - прочитайте код перед установкой, его немного.
 

@@ -1,5 +1,5 @@
 {
-  "name": "sessions-pane",
+  "name": "sessions-panel",
   "version": "0.1.0",
   "description": "Панель живых сессий Claude Code и их статусов, по образцу Claude Control",
   "author": {
@@ -7,7 +7,7 @@
     "url": "https://github.com/SmartAnalyticsAV"
   },
   "types": "./types/index.d.ts",
-  "repository": "https://github.com/SmartAnalyticsAV/claude-sessions-pane",
+  "repository": "https://github.com/SmartAnalyticsAV/claude-sessions-panel",
   "license": "MIT",
   "keywords": [
     "sessions",

@@ -1,5 +1,5 @@
 {
-  "name": "sessions-pane",
+  "name": "sessions-panel",
   "description": "Панель сессий Claude Code: статусы, лимиты и звуки",
   "owner": {
     "name": "SmartAnalyticsAV",
@@ -7,7 +7,7 @@
   },
   "plugins": [
     {
-      "name": "sessions-pane",
+      "name": "sessions-panel",
       "source": "./",
       "description": "Панель живых сессий Claude Code и их статусов, по образцу Claude Control"
     }

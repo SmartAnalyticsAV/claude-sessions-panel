@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { barOf, changesOf, detailOf, formatAge, formatLeft, groupRows, limitRows, rowOf, stateOf } from '../hooks/sessions'
+import { agentsArgv, barOf, cacheDirOf, changesOf, detailOf, formatAge, formatLeft, groupRows, limitRows, rowOf, stateOf } from '../hooks/sessions'
 import type { Agent } from '../hooks/sessions'
 import type { On } from 'claude-code'
 
@@ -93,7 +93,8 @@ function engine(on: On, files: Record<string, string>, agents: Agent[], alive: s
     return { value: text }
   })
   on('fs.stat', () => ({ value: { kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false } }))
-  on('fs.exists', ($, e) => ({ value: files[e.path] !== undefined }))
+  // '/System/Library/CoreServices' is how the mod tells macOS from Linux
+  on('fs.exists', ($, e) => ({ value: e.path === '/System/Library/CoreServices' || files[e.path] !== undefined }))
   on('session.usage', () => ({ value: { startedAt: NOW, context: { window: 200_000 }, rateLimits: [] } }))
 
   return { toasts, sounds, runs }
@@ -113,7 +114,7 @@ test('мод читает реестр и события Claude Control и по�
   await clock.settle()
 
   for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ plugin: 'sessions-pane', surface, component: 'Pane', requestId: 'sessions-pane', props: PANE_PROPS })
+    const ui = await $.ui.mount({ plugin: 'sessions-panel', surface, component: 'Pane', requestId: 'sessions-panel', props: PANE_PROPS })
     expect(await ui.find({ type: 'Text', text: /Ждут решения: 1/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'shop-api-9f' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: 'Черновик статьи (эта)' })).toBeDefined()
@@ -158,7 +159,7 @@ test('звенит одна сессия из нескольких, список
   mock.env(on, { HOME })
   const files: Record<string, string> = {
     [`${HOME}/.claude/sessions/11.json`]: JSON.stringify({ status: 'busy', name: 'shop-api-9f', statusUpdatedAt: NOW - 60_000 }),
-    [`${HOME}/${'Library/Caches/sessions-pane'}/agents.json`]: JSON.stringify({ at: NOW - 1000, files: '11.json', agents: [busy] }),
+    [`${HOME}/${'Library/Caches/sessions-panel'}/agents.json`]: JSON.stringify({ at: NOW - 1000, files: '11.json', agents: [busy] }),
   }
   // 'a-first' sorts before 's-idle': that session plays the sounds, not this one.
   const { toasts, sounds, runs } = engine(on, files, [busy], ['a-first'])
@@ -220,7 +221,7 @@ test('лимиты из ответа любой сессии попадают в
 
   await $.session.start({ cwd: '/w/Wiki', surface: 'desktop', isInteractive: true })
   await clock.settle()
-  expect(files[`${HOME}/Library/Caches/sessions-pane/limits.json`]).toBeUndefined()
+  expect(files[`${HOME}/Library/Caches/sessions-panel/limits.json`]).toBeUndefined()
 
   await $.session.measure({
     context: { window: 200_000 },
@@ -233,7 +234,7 @@ test('лимиты из ответа любой сессии попадают в
   await clock.advance(3000)
 
   for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ plugin: 'sessions-pane', surface, component: 'Pane', requestId: 'sessions-pane', props: PANE_PROPS })
+    const ui = await $.ui.mount({ plugin: 'sessions-panel', surface, component: 'Pane', requestId: 'sessions-panel', props: PANE_PROPS })
     expect(await ui.find({ type: 'Text', text: 'Лимиты' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '41%' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '18%' })).toBeDefined()
@@ -243,14 +244,47 @@ test('лимиты из ответа любой сессии попадают в
   }
 })
 
+test('пути и запуск claude по платформам', async () => {
+  expect(cacheDirOf('mac', '/Users/a', 'x')).toBe('/Users/a/Library/Caches/x')
+  expect(cacheDirOf('linux', '/home/a', 'x')).toBe('/home/a/.cache/x')
+  expect(cacheDirOf('linux', '/home/a', 'x', undefined, '/tmp/cache')).toBe('/tmp/cache/x')
+  expect(cacheDirOf('windows', 'C:/Users/a', 'x', 'C:/Users/a/AppData/Local')).toBe('C:/Users/a/AppData/Local/x')
+  expect(cacheDirOf('windows', 'C:/Users/a', 'x')).toBe('C:/Users/a/AppData/Local/x')
+  expect(agentsArgv('mac')).toEqual(['claude', 'agents', '--json'])
+  expect(agentsArgv('windows')).toEqual(['cmd.exe', '/d', '/s', '/c', 'claude agents --json'])
+})
+
+test('на Windows: домашняя папка из USERPROFILE, кэш в LOCALAPPDATA, claude через cmd.exe', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const USER = 'C:/Users/test'
+  mock.env(on, { USERPROFILE: USER, OS: 'Windows_NT', LOCALAPPDATA: `${USER}/AppData/Local` })
+  const files: Record<string, string> = {
+    [`${USER}/.claude/sessions/11.json`]: JSON.stringify({ status: 'busy', name: 'shop-api-9f', statusUpdatedAt: NOW - 60_000 }),
+  }
+  const { runs } = engine(on, files, [busy])
+
+  await $.session.start({ cwd: 'C:/w', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  expect(runs).toEqual([['cmd.exe', '/d', '/s', '/c', 'claude agents --json']])
+  // On macOS, where the tests run, the engine resolves C:/... against the plugin
+  // folder; on Windows it is absolute. The tail is what tells the folder chosen.
+  const written = Object.keys(files)
+  expect(written.some(path => path.endsWith(`${USER}/AppData/Local/sessions-panel/agents.json`))).toBe(true)
+  expect(written.some(path => path.endsWith(`${USER}/AppData/Local/sessions-panel/alive/s-idle`))).toBe(true)
+
+  const ui = await $.ui.mount({ plugin: 'sessions-panel', surface: 'desktop', component: 'Pane', requestId: 'sessions-panel', props: PANE_PROPS })
+  expect(await ui.find({ type: 'Text', text: 'shop-api-9f' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('панель рисуется в терминале и в приложении', async ($, on) => {
   mock.clock(on, { now: NOW })
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({
-      plugin: 'sessions-pane',
+      plugin: 'sessions-panel',
       surface,
       component: 'Pane',
-      requestId: 'sessions-pane',
+      requestId: 'sessions-panel',
       props: {
         title: 'Сессии',
         isFocused: false,

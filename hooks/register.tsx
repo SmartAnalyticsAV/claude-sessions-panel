@@ -1,11 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { SessionsPaneLimits, SessionsPaneRow, SessionsPaneState } from '../types'
-import { changesOf, detailOf, formatAge, groupRows, limitRows, rowOf, stateOf } from './sessions'
-import type { Agent, ControlEvent, Registry } from './sessions'
+import type { SessionsPanelLimits, SessionsPanelRow, SessionsPanelState } from '../types'
+import { agentsArgv, cacheDirOf, changesOf, detailOf, formatAge, groupRows, limitRows, rowOf, stateOf } from './sessions'
+import type { Agent, ControlEvent, Platform, Registry } from './sessions'
 
-const PANE = 'sessions-pane'
+const PANE = 'sessions-panel'
 const TITLE = 'Сессии'
 const TICK_MS = 3000
 // `claude agents --json` starts the CLI: once per LIST_EVERY ticks, or sooner
@@ -14,17 +14,17 @@ const LIST_EVERY = 5
 // Synthesized bells shipped with the mod: a clip must be the plugin's own file.
 const SOUND_WAITING = 'sounds/waiting.wav'
 const SOUND_FINISHED = 'sounds/finished.wav'
-// Shared by every session the mod runs in: one of them plays the sounds, and
-// the list from `claude agents --json` is fetched once for all of them.
-const STATE_DIR = 'Library/Caches/sessions-pane'
+// Shared by every session the mod runs in, in the platform's cache folder: one
+// of them plays the sounds, and `claude agents --json` is fetched once for all.
+const CACHE_NAME = 'sessions-panel'
 const ALIVE_MS = 10_000
 const CACHE_MS = 12_000
 
 type AgentsCache = { at: number; files: string; agents: Agent[] }
 
-const rows = atom({ plugin: 'sessions-pane', key: 'rows' } as const, [])
-const error = atom({ plugin: 'sessions-pane', key: 'error' } as const, null)
-const limits = atom({ plugin: 'sessions-pane', key: 'limits' } as const, null)
+const rows = atom({ plugin: 'sessions-panel', key: 'rows' } as const, [])
+const error = atom({ plugin: 'sessions-panel', key: 'error' } as const, null)
+const limits = atom({ plugin: 'sessions-panel', key: 'limits' } as const, null)
 
 async function readJson<T>($: EngineInterface, path: string): Promise<T | undefined> {
   try {
@@ -39,7 +39,7 @@ async function collect(
   home: string,
   selfId: string,
   agents: readonly Agent[],
-): Promise<SessionsPaneRow[]> {
+): Promise<SessionsPanelRow[]> {
   return Promise.all(
     agents.map(async agent => {
       const reg = await readJson<Registry>($, `${home}/.claude/sessions/${agent.pid}.json`)
@@ -57,9 +57,31 @@ async function collect(
   )
 }
 
+type Where = { platform: Platform; home: string; dir: string }
+
+// HOME on macOS and Linux, USERPROFILE on Windows, where OS is Windows_NT.
+async function whereOf($: EngineInterface): Promise<Where> {
+  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? ''
+  const platform: Platform =
+    (await $.env.get('OS')) === 'Windows_NT'
+      ? 'windows'
+      : (await $.fs.exists('/System/Library/CoreServices'))
+        ? 'mac'
+        : 'linux'
+  const dir = cacheDirOf(
+    platform,
+    home,
+    CACHE_NAME,
+    await $.env.get('LOCALAPPDATA'),
+    await $.env.get('XDG_CACHE_HOME'),
+  )
+
+  return { platform, home, dir }
+}
+
 // Limits are the account's, reported with each response of any session: the
 // newest reading is kept in the shared folder for every session's panel.
-async function saveLimits($: EngineInterface, path: string, windows: SessionsPaneLimits['windows']) {
+async function saveLimits($: EngineInterface, path: string, windows: SessionsPanelLimits['windows']) {
   if (windows.length === 0) return
   const at = await $.clock.now()
   await $.fs.write(path, JSON.stringify({ at, windows: windows.map(w => ({ kind: w.kind, percentUsed: w.percentUsed, resetsAt: w.resetsAt })) }))
@@ -68,8 +90,8 @@ async function saveLimits($: EngineInterface, path: string, windows: SessionsPan
 export const register: Register = on => {
   on('session.measure', async ($, e, next) => {
     if (e.changed.includes('rateLimits')) {
-      const home = (await $.env.get('HOME')) ?? ''
-      await saveLimits($, `${home}/${STATE_DIR}/limits.json`, e.rateLimits)
+      const { dir } = await whereOf($)
+      await saveLimits($, `${dir}/limits.json`, e.rateLimits)
     }
 
     return next(e)
@@ -81,14 +103,13 @@ export const register: Register = on => {
       description: 'Открыть панель сессий Claude Code',
     })
 
-    const home = (await $.env.get('HOME')) ?? ''
+    const { platform, home, dir } = await whereOf($)
     const selfId = await $.session.id()
     let agents: Agent[] = []
     let files = ''
     let tick = 0
     let isRunning = false
-    let prev: Map<string, SessionsPaneState> | undefined
-    const dir = `${home}/${STATE_DIR}`
+    let prev: Map<string, SessionsPanelState> | undefined
     if (!(await $.fs.exists(`${dir}/limits.json`))) {
       await saveLimits($, `${dir}/limits.json`, (await $.session.usage()).rateLimits)
     }
@@ -110,7 +131,7 @@ export const register: Register = on => {
       if (cache !== undefined && cache.files === names && now - cache.at < CACHE_MS) {
         return cache.agents
       }
-      const out = await $.process.run(['claude', 'agents', '--json'], { timeoutMs: 15000 })
+      const out = await $.process.run(agentsArgv(platform), { timeoutMs: 15000 })
       if (out.exitCode !== 0) throw new Error(out.stderr.trim() || `exit ${out.exitCode}`)
       const listed = JSON.parse(out.stdout) as Agent[]
       await $.fs.write(`${dir}/agents.json`, JSON.stringify({ at: now, files: names, agents: listed }))
@@ -151,7 +172,7 @@ export const register: Register = on => {
         const waitingCount = fresh.filter(row => row.state === 'waiting' && !row.isSelf).length
         $.ui.status(waitingCount > 0 ? `Ждут решения: ${waitingCount}` : undefined)
 
-        const latest = await readJson<SessionsPaneLimits>($, `${dir}/limits.json`)
+        const latest = await readJson<SessionsPanelLimits>($, `${dir}/limits.json`)
         await update($, limits, () => latest ?? null)
         await update($, rows, () => fresh)
         await update($, error, () => null)
