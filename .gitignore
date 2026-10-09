@@ -1,0 +1,4 @@
+# Written by Claude Code on load: types and the tsconfig that extends them
+.claude-plugin/types/
+tsconfig.json
+.DS_Store
