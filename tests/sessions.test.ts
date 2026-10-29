@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { agentsArgv, barOf, cacheDirOf, changesOf, detailOf, formatAge, formatLeft, groupRows, limitRows, rowOf, stateOf } from '../hooks/sessions'
+import { agentsArgv, barOf, continueUrlOf, cacheDirOf, changesOf, detailOf, formatAge, formatLeft, groupRows, limitRows, rowOf, stateOf } from '../hooks/sessions'
 import type { Agent } from '../hooks/sessions'
 import type { On } from 'claude-code'
 
@@ -18,6 +18,7 @@ test('PermissionRequest без движения транскрипта – жд�
   expect(stateOf(busy, { status: 'idle' }, ev, undefined)).toBe('idle')
   expect(stateOf(busy, { status: 'busy' }, { event: 'Stop', ts: 1_000 }, undefined)).toBe('busy')
   expect(stateOf(busy, { status: 'paused' }, undefined, undefined)).toBe('other')
+  expect(stateOf(busy, { status: 'waiting' }, undefined, undefined)).toBe('waiting')
 })
 
 test('возраст и подпись строки', async () => {
@@ -77,6 +78,17 @@ function engine(on: On, files: Record<string, string>, agents: Agent[], alive: s
   on('fs.list', ($, e) => {
     const entry = (name: string) => ({ name, kind: 'file' as const, size: 1, mtimeMs: NOW, isLink: false })
     if (e.path.endsWith('/alive')) return { value: ['s-idle', ...alive].map(entry) }
+    // The desktop app's session files: the folder's children, read off `files`.
+    if (e.path.includes('/claude-code-sessions')) {
+      const names = new Set(
+        Object.keys(files)
+          .filter(path => path.startsWith(`${e.path}/`))
+          .map(path => path.slice(e.path.length + 1).split('/')[0] ?? ''),
+      )
+      return {
+        value: [...names].map(name => ({ ...entry(name), kind: name.endsWith('.json') ? ('file' as const) : ('dir' as const) })),
+      }
+    }
     return { value: agents.map(agent => entry(`${agent.pid}.json`)) }
   })
   on('fs.write', ($, e) => {
@@ -85,7 +97,7 @@ function engine(on: On, files: Record<string, string>, agents: Agent[], alive: s
   })
   on('process.run', ($, e) => {
     runs.push([...e.argv])
-    return { value: { exitCode: 0, stdout: JSON.stringify(agents), stderr: '' } }
+    return { value: { exitCode: 0, stdout: JSON.stringify(agents), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('fs.read', ($, e) => {
     const text = files[e.path]
@@ -195,12 +207,15 @@ test('лимиты: порядок, подписи, цвет по порогам
       { kind: 'seven_day', percentUsed: 92.5, resetsAt: iso(NOW + (3 * 24 + 4) * 3_600_000) },
       { kind: 'five_hour', percentUsed: 41, resetsAt: iso(NOW + 130 * 60_000) },
       { kind: 'spend_limit', percentUsed: 75 },
+      { kind: 'seven_day_opus', percentUsed: 64, resetsAt: iso(NOW - 60_000) },
     ],
     NOW,
   )
-  expect(rows.map(r => r.label)).toEqual(['Сессия', 'Неделя', 'spend_limit'])
-  expect(rows.map(r => r.color)).toEqual(['success', 'error', 'warning'])
-  expect(rows.map(r => r.percent)).toEqual([41, 93, 75])
+  expect(rows.map(r => r.label)).toEqual(['Сессия', 'Неделя', 'spend_limit', 'seven_day_opus'])
+  expect(rows.map(r => r.color)).toEqual(['success', 'error', 'warning', 'subtle'])
+  expect(rows.map(r => r.percent)).toEqual([41, 93, 75, 0])
+  expect(rows.map(r => r.isReset)).toEqual([false, false, false, true])
+  expect(rows[3]?.reset).toBe('')
   expect(rows[0]?.reset).toBe('сброс через 2 ч 10 мин')
   expect(rows[1]?.reset).toBe('сброс через 3 дн 4 ч')
   expect(rows[2]?.reset).toBe('')
@@ -210,7 +225,7 @@ test('лимиты: порядок, подписи, цвет по порогам
   expect(formatLeft(90_000)).toBe('через 2 мин')
 })
 
-test('лимиты из ответа любой сессии попадают в общий файл и на панель', async ($, on) => {
+test('лимиты после каждого ответа любой сессии попадают в общий файл и на панель', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   mock.env(on, { HOME })
   const files: Record<string, string> = {
@@ -229,7 +244,8 @@ test('лимиты из ответа любой сессии попадают в
       { kind: 'five_hour', percentUsed: 41, resetsAt: new Date(NOW + 130 * 60_000).toISOString() },
       { kind: 'seven_day', percentUsed: 18 },
     ],
-    changed: ['rateLimits'],
+    // a turn where only the context moved: the reading is saved all the same
+    changed: ['context'],
   })
   await clock.advance(3000)
 
@@ -242,6 +258,13 @@ test('лимиты из ответа любой сессии попадают в
     expect(await ui.find({ type: 'Text', text: 'сброс через 2 ч 10 мин' })).toBeDefined()
     await ui.unmount()
   }
+
+  // five hours later nothing has reported again: the 5-hour window reads as reset
+  await clock.advance(131 * 60_000)
+  const ui = await $.ui.mount({ plugin: 'sessions-panel', surface: 'desktop', component: 'Pane', requestId: 'sessions-panel', props: PANE_PROPS })
+  expect(await ui.find({ type: 'Text', text: 'окно сброшено' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '41%' })).toBeUndefined()
+  await ui.unmount()
 })
 
 test('пути и запуск claude по платформам', async () => {
@@ -297,4 +320,63 @@ test('панель рисуется в терминале и в приложен
     expect(await ui.find({ type: 'Text', text: /Ищу сессии/ })).toBeDefined()
     await ui.unmount()
   }
+})
+
+test('название сессии приложения – кнопка, клик открывает её во вкладке Code', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  mock.env(on, { HOME })
+  const app = `${HOME}/Library/Application Support/Claude/claude-code-sessions/acc/org`
+  const files: Record<string, string> = {
+    [`${HOME}/.claude/sessions/11.json`]: JSON.stringify({ status: 'busy', name: 'shop-api-9f', statusUpdatedAt: NOW - 60_000, entrypoint: 'claude-desktop' }),
+    [`${HOME}/.claude/sessions/12.json`]: JSON.stringify({ status: 'idle', name: 'Черновик статьи', statusUpdatedAt: NOW - 120_000, entrypoint: 'claude-desktop' }),
+    [`${HOME}/.claude/sessions/13.json`]: JSON.stringify({ status: 'idle', statusUpdatedAt: NOW - 120_000, entrypoint: 'cli' }),
+    [`${app}/local_aaa-1.json`]: JSON.stringify({ sessionId: 'local_aaa-1', cliSessionId: 's-busy' }),
+    [`${app}/local_bbb-2.json`]: JSON.stringify({ sessionId: 'local_bbb-2', cliSessionId: 's-idle' }),
+  }
+  const { runs } = engine(on, files, [busy, idle, stale])
+
+  await $.session.start({ cwd: '/w/Wiki', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ plugin: 'sessions-panel', surface: 'desktop', component: 'Pane', requestId: 'sessions-panel', props: PANE_PROPS })
+  // Своя сессия и терминальная остаются текстом.
+  expect(await ui.find({ type: 'Text', text: 'Черновик статьи (эта)' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'open-s-idle' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'open-s-old' })).toBeUndefined()
+  await ui.press({ key: 'open-s-busy' })
+  await clock.settle()
+  expect(runs.at(-1)).toEqual(['open', continueUrlOf('local_aaa-1')])
+  await ui.unmount()
+})
+
+test('метка времени под промптом, /sessions-time off её выключает, on включает', async ($, on) => {
+  mock.clock(on, { now: new Date(2026, 9, 29, 18, 52).getTime() })
+  const logs: string[] = []
+  const store = new Map<string, unknown>()
+  on('ui.log', ($, e) => {
+    logs.push(e.text)
+    return { value: undefined }
+  })
+  on('store.get', ($, e) => ({ value: store.get(e.key) }))
+  on('store.set', ($, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('prompt.submit', ($, e) => ({ text: e.text }))
+  const typed = (text: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'composer' } })
+
+  await typed('привет')
+  expect(logs).toEqual(['🕒 29.10 18:52'])
+
+  await $.prompt.submit({ text: 'от плагина', wait: false, origin: { kind: 'plugin', plugin: 'x' } } as never)
+  await typed('/sessions')
+  expect(logs.length).toBe(1)
+
+  expect((await $.command.run({ command: 'sessions-time', args: 'off' } as never)).text).toMatch(/выключены/)
+  await typed('ещё')
+  expect(logs.length).toBe(1)
+
+  expect((await $.command.run({ command: 'sessions-time', args: 'on' } as never)).text).toMatch(/включены/)
+  await typed('и ещё')
+  expect(logs.length).toBe(2)
 })

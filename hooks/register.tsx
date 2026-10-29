@@ -2,8 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { SessionsPanelLimits, SessionsPanelRow, SessionsPanelState } from '../types'
-import { agentsArgv, cacheDirOf, changesOf, detailOf, formatAge, groupRows, limitRows, rowOf, stateOf } from './sessions'
-import type { Agent, ControlEvent, Platform, Registry } from './sessions'
+import { agentsArgv, APP_ID, cacheDirOf, changesOf, continueUrlOf, detailOf, formatAge, groupRows, limitRows, rowOf, stateOf } from './sessions'
+import type { Agent, AppSession, ControlEvent, Platform, Registry } from './sessions'
 
 const PANE = 'sessions-panel'
 const TITLE = 'Сессии'
@@ -19,6 +19,8 @@ const SOUND_FINISHED = 'sounds/finished.wav'
 const CACHE_NAME = 'sessions-panel'
 const ALIVE_MS = 10_000
 const CACHE_MS = 12_000
+// Time stamps under the person's prompts: on unless `/sessions-time off` stored false.
+const TIME_KEY = 'timestamps'
 
 type AgentsCache = { at: number; files: string; agents: Agent[] }
 
@@ -57,6 +59,47 @@ async function collect(
   )
 }
 
+// The desktop app keeps a file per session it runs, two folders deep. Each file
+// is read once: what it names does not change, so only new ones are read later.
+async function scanAppSessions(
+  $: EngineInterface,
+  root: string,
+  seen: Set<string>,
+  appIds: Map<string, string>,
+): Promise<void> {
+  const dirs = async (path: string) =>
+    (await $.fs.list(path).catch(() => [])).filter(entry => entry.kind === 'dir').map(entry => `${path}/${entry.name}`)
+  for (const account of await dirs(root)) {
+    for (const folder of await dirs(account)) {
+      for (const entry of await $.fs.list(folder).catch(() => [])) {
+        const path = `${folder}/${entry.name}`
+        if (!entry.name.startsWith('local_') || !entry.name.endsWith('.json') || seen.has(path)) continue
+        seen.add(path)
+        const app = await readJson<AppSession>($, path)
+        if (app?.cliSessionId && app.sessionId && APP_ID.test(app.sessionId)) appIds.set(app.cliSessionId, app.sessionId)
+      }
+    }
+  }
+}
+
+// '29.10 18:52' in the computer's own time zone; Date's fields if Intl is missing.
+function stampOf(ms: number): string {
+  try {
+    return new Intl.DateTimeFormat('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+      .format(ms)
+      .replace(',', '')
+  } catch {
+    const d = new Date(ms)
+    const two = (n: number) => String(n).padStart(2, '0')
+    return `${two(d.getDate())}.${two(d.getMonth() + 1)} ${two(d.getHours())}:${two(d.getMinutes())}`
+  }
+}
+
 type Where = { platform: Platform; home: string; dir: string }
 
 // HOME on macOS and Linux, USERPROFILE on Windows, where OS is Windows_NT.
@@ -88,8 +131,10 @@ async function saveLimits($: EngineInterface, path: string, windows: SessionsPan
 }
 
 export const register: Register = on => {
+  // Fires after every turn of a session, not only when a window moved: each
+  // reading is saved, so the panel's 'обновлено' is the last check.
   on('session.measure', async ($, e, next) => {
-    if (e.changed.includes('rateLimits')) {
+    if (e.rateLimits.length > 0) {
       const { dir } = await whereOf($)
       await saveLimits($, `${dir}/limits.json`, e.rateLimits)
     }
@@ -102,6 +147,10 @@ export const register: Register = on => {
       name: 'sessions',
       description: 'Открыть панель сессий Claude Code',
     })
+    await $.command.register({
+      name: 'sessions-time',
+      description: 'Метки времени под промптами: on, off или пусто – узнать состояние',
+    })
 
     const { platform, home, dir } = await whereOf($)
     const selfId = await $.session.id()
@@ -110,6 +159,9 @@ export const register: Register = on => {
     let tick = 0
     let isRunning = false
     let prev: Map<string, SessionsPanelState> | undefined
+    const appRoot = platform === 'mac' ? `${home}/Library/Application Support/Claude/claude-code-sessions` : undefined
+    const seenAppFiles = new Set<string>()
+    const appIds = new Map<string, string>()
     if (!(await $.fs.exists(`${dir}/limits.json`))) {
       await saveLimits($, `${dir}/limits.json`, (await $.session.usage()).rateLimits)
     }
@@ -156,7 +208,14 @@ export const register: Register = on => {
         }
         tick += 1
 
-        const fresh = await collect($, home, selfId, agents)
+        const listed = await collect($, home, selfId, agents)
+        if (appRoot !== undefined && listed.some(row => row.via === 'desktop' && !appIds.has(row.id))) {
+          await scanAppSessions($, appRoot, seenAppFiles, appIds)
+        }
+        const fresh = listed.map(row => {
+          const appId = appIds.get(row.id)
+          return appId === undefined ? row : { ...row, appId }
+        })
         const changes = changesOf(prev, fresh)
         for (const row of changes.waiting) {
           if (!row.isSelf) $.ui.toast(`${row.name}: ждёт решения`)
@@ -196,8 +255,28 @@ export const register: Register = on => {
     return { text: opened.isPlaced ? 'Панель сессий открыта.' : 'Панель сессий не открылась.' }
   })
 
+  // Only what the person typed: not slash commands, notifications or peers.
+  on('prompt.submit', async ($, e, next) => {
+    const result = await next(e)
+    const isTyped = e.origin.kind === 'composer' || e.origin.kind === 'bridge'
+    if (isTyped && !e.text.trimStart().startsWith('/') && !('drop' in result) && (await $.store.get(TIME_KEY)) !== false) {
+      $.ui.log(`🕒 ${stampOf(await $.clock.now())}`)
+    }
+
+    return result
+  })
+
+  on('command.run', { command: 'sessions-time' }, async ($, e) => {
+    const arg = e.args.trim().toLowerCase()
+    if (arg === 'on' || arg === 'off') await $.store.set(TIME_KEY, arg === 'on')
+    else if (arg !== '') return { text: 'Укажи on или off: /sessions-time on' }
+    const isOn = (await $.store.get(TIME_KEY)) !== false
+
+    return { text: isOn ? 'Метки времени под промптами включены.' : 'Метки времени под промптами выключены.' }
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
     const list = await read($, rows)
     const failed = await read($, error)
     const usage = await read($, limits)
@@ -222,10 +301,16 @@ export const register: Register = on => {
                   <Box width={8}>
                     <Text>{window.label}</Text>
                   </Box>
-                  <Text color={window.color}>{window.bar} </Text>
-                  <Text bold color={window.color}>
-                    {window.percent}%
-                  </Text>
+                  {window.isReset ? (
+                    <Text dimColor>окно сброшено</Text>
+                  ) : (
+                    <>
+                      <Text color={window.color}>{window.bar} </Text>
+                      <Text bold color={window.color}>
+                        {window.percent}%
+                      </Text>
+                    </>
+                  )}
                 </Box>
                 {window.reset !== '' && (
                   <Box paddingLeft={2}>
@@ -248,9 +333,18 @@ export const register: Register = on => {
             {group.rows.map(row => (
               <Box key={row.id}>
                 <Text color={group.color}>{group.glyph} </Text>
-                <Text bold={row.isSelf} wrap="truncate-end">
-                  {row.isSelf ? `${row.name} (эта)` : row.name}
-                </Text>
+                {row.appId !== undefined && !row.isSelf ? (
+                  <Button
+                    key={`open-${row.id}`}
+                    plain
+                    label={row.name}
+                    onPress={() => void $.process.run(['open', continueUrlOf(row.appId ?? '')], { timeoutMs: 5000 }).catch(() => undefined)}
+                  />
+                ) : (
+                  <Text bold={row.isSelf} wrap="truncate-end">
+                    {row.isSelf ? `${row.name} (эта)` : row.name}
+                  </Text>
+                )}
                 <Text dimColor wrap="truncate-end">
                   {' · '}
                   {detailOf(row, now)}

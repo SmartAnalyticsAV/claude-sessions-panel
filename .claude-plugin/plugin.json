@@ -1,6 +1,6 @@
 {
   "name": "sessions-panel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Панель живых сессий Claude Code и их статусов, по образцу Claude Control",
   "author": {
     "name": "SmartAnalyticsAV",

@@ -8,6 +8,8 @@ export type SessionsPanelRow = {
   since: number
   via: string
   isSelf: boolean
+  // The desktop app's own id (local_…), where the app runs the session.
+  appId?: string
 }
 
 export type SessionsPanelLimits = {

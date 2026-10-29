@@ -63,6 +63,8 @@ export function stateOf(
 ): SessionsPanelState {
   const status = reg?.status ?? agent.status
   if (status === 'idle') return 'idle'
+  // Scheduled tasks have no Claude Control events: the engine itself marks them waiting.
+  if (status === 'waiting') return 'waiting'
   if (status !== 'busy') return 'other'
   if (ev?.event !== 'PermissionRequest' || ev.ts === undefined) return 'busy'
   if (transcriptMtimeMs !== undefined && transcriptMtimeMs > ev.ts * 1000 + GRACE_MS) return 'busy'
@@ -145,7 +147,9 @@ const LIMIT_LABELS: Record<string, string> = {
   seven_day: 'Неделя',
 }
 
-// The 5-hour window first, then the week, then any other window as named.
+// The 5-hour window first, then the week, then any other window as named. A
+// window whose reset time has passed is shown as reset, not with its old fill:
+// no response has reported the new one yet.
 export function limitRows(windows: readonly { kind: string; percentUsed: number; resetsAt?: string }[], now: number) {
   const order = (kind: string) => (kind === 'five_hour' ? 0 : kind === 'seven_day' ? 1 : 2)
 
@@ -153,14 +157,16 @@ export function limitRows(windows: readonly { kind: string; percentUsed: number;
     .sort((a, b) => order(a.kind) - order(b.kind))
     .map(window => {
       const resetsAt = window.resetsAt === undefined ? NaN : Date.parse(window.resetsAt)
+      const isReset = !Number.isNaN(resetsAt) && resetsAt <= now
 
       return {
         kind: window.kind,
         label: LIMIT_LABELS[window.kind] ?? window.kind,
-        percent: Math.round(window.percentUsed),
-        bar: barOf(window.percentUsed),
-        color: window.percentUsed >= 90 ? 'error' : window.percentUsed >= 70 ? 'warning' : 'success',
-        reset: Number.isNaN(resetsAt) ? '' : `сброс ${formatLeft(resetsAt - now)}`,
+        isReset,
+        percent: isReset ? 0 : Math.round(window.percentUsed),
+        bar: barOf(isReset ? 0 : window.percentUsed),
+        color: isReset ? 'subtle' : window.percentUsed >= 90 ? 'error' : window.percentUsed >= 70 ? 'warning' : 'success',
+        reset: Number.isNaN(resetsAt) || isReset ? '' : `сброс ${formatLeft(resetsAt - now)}`,
       }
     })
 }
@@ -179,6 +185,20 @@ export function formatLeft(ms: number): string {
   if (hours < 24) return `через ${hours} ч ${min % 60} мин`
 
   return `через ${Math.floor(hours / 24)} дн ${hours % 24} ч`
+}
+
+// ~/Library/Application Support/Claude/claude-code-sessions/<…>/<…>/local_<id>.json:
+// the desktop app's record of a session it runs, naming the engine's id.
+export type AppSession = {
+  sessionId?: string
+  cliSessionId?: string
+}
+
+export const APP_ID = /^local_[A-Za-z0-9-]{1,64}$/
+
+// The link the desktop app answers by bringing that session up in its Code tab.
+export function continueUrlOf(appId: string): string {
+  return `claude://code/continue?session=${appId}`
 }
 
 export type Platform = 'mac' | 'windows' | 'linux'
